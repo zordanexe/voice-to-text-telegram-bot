@@ -1,26 +1,67 @@
+import asyncio
 import logging
 import os
 import tempfile
+import re
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from dotenv import load_dotenv
-from openai import AsyncOpenAI
+from faster_whisper import WhisperModel
+from faster_whisper.audio import decode_audio
+import numpy as np
 from telegram import Update
 from telegram.constants import ChatAction
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 
-load_dotenv()
+BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(BASE_DIR / ".env", encoding="utf-8-sig")
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     level=logging.INFO,
+    handlers=[
+        logging.StreamHandler(),
+        RotatingFileHandler(BASE_DIR / "bot.log", maxBytes=1_000_000, backupCount=2, encoding="utf-8"),
+    ],
 )
 logger = logging.getLogger(__name__)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-TRANSCRIPTION_MODEL = os.getenv("TRANSCRIPTION_MODEL", "gpt-4o-mini-transcribe")
+WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "small")
+whisper_model: WhisperModel | None = None
+MAX_VOICE_BYTES = 20_000_000
+MAX_VOICE_SECONDS = 600
+
+
+def transcribe_locally(audio_path: Path) -> str:
+    """Run Whisper on the local CPU and join all recognized segments."""
+    global whisper_model
+    audio = decode_audio(str(audio_path), sampling_rate=16000)
+    if audio.size == 0 or not np.any(audio):
+        logger.info("Audio contains no signal")
+        return ""
+    if whisper_model is None:
+        whisper_model = WhisperModel(
+            WHISPER_MODEL_SIZE,
+            device="cpu",
+            compute_type="int8",
+        )
+
+    segments, _ = whisper_model.transcribe(
+        audio,
+        task="transcribe",
+        language="ru",
+        vad_filter=True,
+        beam_size=5,
+        condition_on_previous_text=False,
+    )
+    text = " ".join(segment.text.strip() for segment in segments).strip()
+    logger.info("Local transcription completed with %s characters", len(text))
+    return text
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -36,6 +77,9 @@ async def transcribe_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     message = update.message
     if not message or not message.voice:
         return
+    if (message.voice.file_size or 0) > MAX_VOICE_BYTES or message.voice.duration > MAX_VOICE_SECONDS:
+        await message.reply_text("Отправьте запись длительностью до 10 минут и размером до 20 МБ.")
+        return
 
     await message.chat.send_action(ChatAction.TYPING)
     status_message = await message.reply_text("Распознаю голосовое сообщение…")
@@ -48,20 +92,15 @@ async def transcribe_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
         await voice_file.download_to_drive(custom_path=temp_path)
 
-        client = AsyncOpenAI(api_key=OPENAI_API_KEY)
-        with temp_path.open("rb") as audio_file:
-            transcription = await client.audio.transcriptions.create(
-                model=TRANSCRIPTION_MODEL,
-                file=audio_file,
-                response_format="text",
-            )
-
-        text = str(transcription).strip()
+        text = await asyncio.to_thread(transcribe_locally, temp_path)
         if not text:
-            text = "Не удалось распознать речь. Попробуйте записать сообщение ещё раз."
-        await status_message.edit_text(text)
-    except Exception:
-        logger.exception("Voice transcription failed")
+            text = "В записи не обнаружена речь. Прослушайте её в Telegram и проверьте микрофон."
+        await status_message.edit_text(text[:2000])
+        for offset in range(2000, len(text), 2000):
+            await message.reply_text(text[offset:offset + 2000])
+        logger.info("Voice response delivered")
+    except Exception as error:
+        logger.error("Voice transcription failed (%s)", type(error).__name__)
         await status_message.edit_text(
             "Не удалось обработать голосовое сообщение. Попробуйте ещё раз позже."
         )
@@ -77,23 +116,29 @@ async def unsupported_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 def validate_config() -> None:
-    missing = []
-    if not TELEGRAM_BOT_TOKEN:
-        missing.append("TELEGRAM_BOT_TOKEN")
-    if not OPENAI_API_KEY:
-        missing.append("OPENAI_API_KEY")
-    if missing:
-        raise RuntimeError(f"Не заданы переменные окружения: {', '.join(missing)}")
+    if not TELEGRAM_BOT_TOKEN or not re.fullmatch(r"\d+:[A-Za-z0-9_-]{30,}", TELEGRAM_BOT_TOKEN):
+        raise RuntimeError("Укажите действительный TELEGRAM_BOT_TOKEN в .env (токен от @BotFather).")
+
+
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Exception strings and tracebacks can contain Telegram download URLs with tokens.
+    logger.error("Telegram update failed (%s)", type(context.error).__name__)
 
 
 def main() -> None:
     validate_config()
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).concurrent_updates(False).build()
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", start))
     application.add_handler(MessageHandler(filters.VOICE, transcribe_voice))
     application.add_handler(MessageHandler(filters.ALL, unsupported_message))
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    application.add_error_handler(on_error)
+    application.run_polling(allowed_updates=["message"])
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as error:
+        logger.error("Bot stopped (%s). Check .env, network and that only one instance is running.", type(error).__name__)
+        raise SystemExit(1) from None

@@ -3,3 +3,10 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+bot.log
+bot.log.*
+last_voice.ogg
+HANDOFF.md
+.env.*
+!.env.example
+.runtime/
