@@ -48,15 +48,15 @@ git clone https://github.com/zordanexe/voice-to-text-telegram-bot.git
 cd voice-to-text-telegram-bot
 ```
 
-### Windows · PowerShell
+### Windows · PowerShell или Git Bash
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\run_local.ps1
+powershell.exe -ExecutionPolicy Bypass -File ./run_local.ps1
 ```
 
-Скрипт создаст `.venv`, установит зависимости и при отсутствии `.env` запросит токен скрытым вводом. Затем запустит бота. Для следующих запусков используйте ту же команду. Активация виртуального окружения не требуется.
+Скрипт создаст `.venv`, установит зависимости и при отсутствии `.env` запросит токен скрытым вводом. Затем запустит бота. Для следующих запусков используйте ту же команду. Активация виртуального окружения не требуется. Используйте прямой слеш `/` в пути `./run_local.ps1`: эта запись подходит для PowerShell и Git Bash.
 
-Если устанавливаете вручную:
+Если устанавливаете вручную в PowerShell:
 
 ```powershell
 python -m venv .venv
