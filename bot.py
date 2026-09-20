@@ -68,6 +68,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Explain the single purpose of the bot."""
     if update.message:
         await update.message.reply_text(
+            "Привет, я умею распознавать голос и переводить его в текст.\n\n"
             "Отправьте мне голосовое сообщение — я верну его текстом."
         )
 
